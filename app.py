@@ -33,10 +33,17 @@ Domaines : op-amp, convertisseurs (ADC/DAC/Sigma-Delta), PLL, chopper, LDO/DC-DC
 bruit/variabilité, layout/matching, fiabilité/ESD, Verilog-A.
 
 Règles :
-- Quand des extraits de documents sont fournis, cite leur source exacte.
-- Quand une image de circuit est fournie, analyse : topologie, nœuds critiques,
-  problèmes potentiels, améliorations suggérées.
+- Quand des extraits de documents sont fournis, cite leur source exacte (titre + page).
+- Quand une image de circuit est fournie, identifie la topologie, les blocs clés,
+  les nœuds critiques, les problèmes potentiels.
+- Si des documents pertinents ont été trouvés, explique concrètement ce qu'ils apportent
+  par rapport à l'architecture présentée.
 - Sois précis, technique. Mentionne les compromis. Utilise des équations si pertinent."""
+
+VISION_PROBE = """Tu es un expert en circuits intégrés analogiques.
+Analyse cette image de circuit/architecture et génère une description technique dense
+(150 mots max) en anglais, listant : topologie, blocs fonctionnels, type de signal,
+technologie probable, mots-clés de recherche. Pas de phrase d'intro, juste les faits."""
 
 
 # ── RAG ───────────────────────────────────────────────────────────────────────
@@ -93,29 +100,45 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
-if prompt := st.chat_input("Pose ta question…"):
+if prompt := st.chat_input("Pose ta question… ou uploade un circuit et demande une analyse"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # RAG
+    img = None
+    circuit_description = None
+    if img_file:
+        img_file.seek(0)
+        img = Image.open(img_file)
+
+    # ── Si image présente : décrire le circuit pour enrichir la requête RAG ──
+    if img and use_rag:
+        with st.spinner("Analyse du circuit…"):
+            probe_resp = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[VISION_PROBE, img],
+            )
+            circuit_description = probe_resp.text
+
+    # ── RAG : recherche sur description circuit + question utilisateur ────────
+    rag_query = " ".join(filter(None, [circuit_description, prompt]))
     sources, context = [], ""
     if use_rag:
         with st.spinner("Recherche dans tes docs…"):
-            sources = search(prompt, category, n_chunks)
+            sources = search(rag_query, category, n_chunks)
             context = build_context(sources)
 
-    # Prompt complet
+    # ── Prompt final ──────────────────────────────────────────────────────────
     full_prompt = SYSTEM + "\n\n"
+    if circuit_description:
+        full_prompt += f"## Description automatique du circuit uploadé\n{circuit_description}\n\n"
     if context:
         full_prompt += context + "\n\n---\n\n"
-    full_prompt += f"Question : {prompt}"
+    full_prompt += f"Question de l'utilisateur : {prompt}"
 
-    # Contenu (texte + image éventuelle)
     contents: list = [full_prompt]
-    if img_file:
-        img_file.seek(0)
-        contents.append(Image.open(img_file))
+    if img:
+        contents.append(img)
 
     with st.chat_message("assistant"):
         with st.spinner("Réflexion…"):
@@ -134,5 +157,8 @@ if prompt := st.chat_input("Pose ta question…"):
                         f"{icon} **{s['title']}** — `{s['category']}` — p.{s['page_num']}  \n"
                         f"> {s['content'][:250]}…"
                     )
+        if circuit_description:
+            with st.expander("🔍 Description circuit utilisée pour la recherche"):
+                st.markdown(circuit_description)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
