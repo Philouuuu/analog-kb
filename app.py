@@ -5,7 +5,8 @@ Interface Streamlit — RAG sur Drive + Obsidian + vision circuits (Gemini)
 
 import os
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from supabase import create_client
 from PIL import Image
 
@@ -16,8 +17,8 @@ def _s(k):
     try:    return st.secrets[k]
     except: return os.environ.get(k, "")
 
-genai.configure(api_key=_s("GOOGLE_API_KEY"))
-sb = create_client(_s("SUPABASE_URL"), _s("SUPABASE_KEY"))
+client = genai.Client(api_key=_s("GOOGLE_API_KEY"))
+sb     = create_client(_s("SUPABASE_URL"), _s("SUPABASE_KEY"))
 
 CATEGORIES = [
     "Toutes", "opamp", "data_converters", "chopper_offset",
@@ -27,7 +28,7 @@ CATEGORIES = [
     "technos_st", "general_analog_courses", "reference_books",
 ]
 
-SYSTEM = """Tu es un expert en design de circuits intégrés analogiques CMOS (ST Microelectronics context).
+SYSTEM = """Tu es un expert en design de circuits intégrés analogiques CMOS (contexte ST Microelectronics).
 Domaines : op-amp, convertisseurs (ADC/DAC/Sigma-Delta), PLL, chopper, LDO/DC-DC,
 bruit/variabilité, layout/matching, fiabilité/ESD, Verilog-A.
 
@@ -41,13 +42,12 @@ Règles :
 # ── RAG ───────────────────────────────────────────────────────────────────────
 
 def embed_query(text: str) -> list[float]:
-    r = genai.embed_content(
-        model="models/text-embedding-004",
-        content=text,
-        task_type="retrieval_query",
+    result = client.models.embed_content(
+        model="text-embedding-004",
+        contents=text,
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
     )
-    emb = r["embedding"]
-    return emb if isinstance(emb[0], float) else emb[0]
+    return result.embeddings[0].values
 
 def search(query: str, category: str, k: int) -> list[dict]:
     emb    = embed_query(query)
@@ -98,7 +98,7 @@ if prompt := st.chat_input("Pose ta question…"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Recherche RAG
+    # RAG
     sources, context = [], ""
     if use_rag:
         with st.spinner("Recherche dans tes docs…"):
@@ -111,16 +111,19 @@ if prompt := st.chat_input("Pose ta question…"):
         full_prompt += context + "\n\n---\n\n"
     full_prompt += f"Question : {prompt}"
 
-    # Appel Gemini (avec ou sans image)
-    model    = genai.GenerativeModel("gemini-1.5-flash")
-    contents = [full_prompt]
+    # Contenu (texte + image éventuelle)
+    contents: list = [full_prompt]
     if img_file:
         img_file.seek(0)
         contents.append(Image.open(img_file))
 
     with st.chat_message("assistant"):
         with st.spinner("Réflexion…"):
-            answer = model.generate_content(contents).text
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+            )
+            answer = response.text
         st.markdown(answer)
 
         if sources:
