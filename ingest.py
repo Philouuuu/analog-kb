@@ -5,9 +5,8 @@ Lit PDFs (Drive) et Markdown (Obsidian/GitHub), embède avec Gemini,
 stocke dans Supabase.
 
 Setup :
-  pip install -r requirements-ingest.txt
-  cp .env.example .env  # remplis les valeurs
-  source .env  (Linux/Mac) ou set les vars (Windows)
+  pip install pdfplumber google-genai supabase python-dotenv
+  cp .env.example .env   # remplis les valeurs
 
 Usage :
   # Indexer tous les PDFs du dossier ST Drive :
@@ -22,8 +21,8 @@ Usage :
 import os, sys, time, argparse
 from pathlib import Path
 
+import requests
 import pdfplumber
-import google.generativeai as genai
 from supabase import create_client
 from dotenv import load_dotenv
 
@@ -33,8 +32,9 @@ GOOGLE_API_KEY   = os.environ["GOOGLE_API_KEY"]
 SUPABASE_URL     = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE = os.environ["SUPABASE_SERVICE_KEY"]
 
-genai.configure(api_key=GOOGLE_API_KEY)
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE)
+
+EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
 
 CATEGORIES = {
     "reference_books","data_converters","opamp","chopper_offset",
@@ -68,17 +68,36 @@ def chunk_text(text: str, page_num: int) -> list[dict]:
         start += CHUNK_CHARS - OVERLAP_CHARS
     return chunks
 
-def embed_texts(texts: list[str], task: str = "retrieval_document") -> list[list[float]]:
-    r = genai.embed_content(
-        model="models/text-embedding-004",
-        content=texts,
-        task_type=task,
-    )
-    embs = r["embedding"]
-    # L'API renvoie une liste de listes ou une seule liste selon le batch
-    if embs and isinstance(embs[0], float):
-        embs = [embs]
-    return embs
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    results = []
+    for text in texts:
+        payload = {
+            "model": "models/gemini-embedding-001",
+            "content": {"parts": [{"text": text}]},
+            "taskType": "RETRIEVAL_DOCUMENT",
+            "outputDimensionality": 768,
+        }
+        for attempt in range(6):
+            r = requests.post(EMBED_URL, params={"key": GOOGLE_API_KEY}, json=payload)
+            if r.status_code == 429:
+                body = r.json()
+                # Quota journalier épuisé → inutile de retry
+                msg = str(body).lower()
+                if "quota" in msg or "exhausted" in msg or "limit" in msg:
+                    raise RuntimeError(
+                        f"⛔ Quota journalier Gemini épuisé. Relance demain.\nDétail: {body}"
+                    )
+                wait = 5 * (2 ** attempt)   # 5, 10, 20, 40, 80, 160s
+                print(f"    ⏳ Rate limit — attente {wait}s...")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            results.append(r.json()["embedding"]["values"])
+            time.sleep(1.0)   # 1s entre chaque chunk
+            break
+        else:
+            raise RuntimeError("Rate limit persistant après 6 tentatives")
+    return results
 
 def already_indexed(file_path: str) -> bool:
     r = sb.table("documents").select("id").eq("file_path", file_path).execute()
@@ -134,9 +153,15 @@ def process_pdf(path: Path, root: Path):
     }).execute()
     doc_id = doc.data[0]["id"]
 
-    embeddings = embed_all([c["content"] for c in chunks])
-    insert_chunks(doc_id, chunks, embeddings)
-    print(f"    ✅ {len(chunks)} chunks → {infer_category(path)}")
+    try:
+        embeddings = embed_all([c["content"] for c in chunks])
+        insert_chunks(doc_id, chunks, embeddings)
+        print(f"    ✅ {len(chunks)} chunks → {infer_category(path)}")
+    except Exception as e:
+        # Rollback : on supprime le document pour pouvoir retenter
+        sb.table("documents").delete().eq("id", doc_id).execute()
+        print(f"    ❌ Rollback — document supprimé, relance possible. ({e})")
+        raise
 
 
 # ── Traitement Markdown ────────────────────────────────────────────────────────
