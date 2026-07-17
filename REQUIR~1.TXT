@@ -1,5 +1,4 @@
-# App Streamlit (à déployer sur Streamlit Cloud)
 streamlit>=1.35
-google-generativeai>=0.7
+google-generativeai==0.8.3
 supabase>=2.4
 Pillow>=10.0
