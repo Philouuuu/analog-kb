@@ -45,7 +45,7 @@ def embed_query(text: str) -> list[float]:
     result = client.models.embed_content(
         model="gemini-embedding-001",
         contents=text,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768),
     )
     return result.embeddings[0].values
 
